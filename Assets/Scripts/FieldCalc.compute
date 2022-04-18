@@ -1,0 +1,141 @@
+
+#pragma kernel ElectricField
+#pragma kernel MagneticField
+
+RWStructuredBuffer<float3x4> _Vectors;
+RWStructuredBuffer<float4> _Currents;
+RWStructuredBuffer<float3> _CurrentPos;
+RWStructuredBuffer<float4> _Charges;
+RWStructuredBuffer<float> _Mags;
+RWStructuredBuffer<float3> _FieldPos;
+RWStructuredBuffer<float3> _Forwards;
+RWStructuredBuffer<float3> _Rights;
+
+uint _Resolution;
+uint _ChargeCount;
+uint _CurrentCount;
+uint _Scaling;
+
+float _Step;
+float _MaxLength;
+
+float3 GetPOS(uint3 id){
+    float3 pos;
+    pos = _FieldPos[id.z] + ((id.x + 0.5f) * _Rights[id.z] + (id.y + 0.5f) * _Forwards[id.z]) * _Step;
+    return pos;
+}
+
+float3 CrossProd(float3 vec1, float3 vec2){
+    float3 cross;
+    cross.x = vec1.y * vec2.z - vec1.z * vec2.y;
+    cross.y = vec1.z * vec2.x - vec1.x * vec2.z;
+    cross.z = vec1.x * vec2.y - vec1.y * vec2.x;
+    return cross;
+}
+
+float Magnitude(float3 vec){
+    return sqrt(vec.x * vec.x + vec.y * vec.y + vec.z * vec.z);
+}
+
+float3 Normalized(float3 vec){
+    return vec / Magnitude(vec);
+}
+
+float DotProd(float3 vec1, float3 vec2){
+    return vec1.x * vec2.x + vec1.y * vec2.y + vec1.z * vec2.z;
+}
+
+void CalcTransformationMatrix(uint3 id, float3 dir){
+    // Start by scaling vector
+    float mag = Magnitude(dir);
+    float3 init = float3(0, 0, mag);
+
+    // Calculate the axis to rotate around
+    float3 n = Normalized(CrossProd(init, dir));
+
+    // Precalculate values to be used in matrix
+    float CosTH = DotProd(dir, float3(0, 0, 1)) / mag;
+    float SinTH = Magnitude(CrossProd(float3(0,0,1), dir)) / mag;
+    float OneMCos = 1 - CosTH;
+
+    // Adjust scaling based on chosen scaling type
+    if(_Scaling == 1){
+        mag = sqrt(Magnitude(dir));
+    }
+    else if(_Scaling == 2){
+        mag = log(Magnitude(dir));
+    }
+    
+    // Clamp the magnitude at a maximum to avoid singularities
+    if(mag > _MaxLength){
+        mag = _MaxLength;
+    }
+    _Mags[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution] = 1 / _MaxLength;
+
+    // Store transformation matrix in buffer
+    _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m00 = (CosTH + n.x * n.x * OneMCos) * _Step;
+    _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m01 = (n.x * n.y * OneMCos - n.z * SinTH) * _Step;
+    _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m02 = mag * (n.x * n.z * OneMCos + n.y * SinTH) * _Step;
+
+    _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m10 = (n.y * n.x * OneMCos + n.z * SinTH) * _Step;
+    _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m11 = (CosTH + n.y * n.y * OneMCos) * _Step;
+    _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m12 = mag * (n.y * n.z * OneMCos - n.x * SinTH) * _Step;
+
+    _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m20 = (n.z * n.x * OneMCos - n.y * SinTH) * _Step;
+    _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m21 = (n.z * n.y * OneMCos + n.x * SinTH) * _Step;
+    _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m22 = mag * (CosTH + n.z * n.z * OneMCos) * _Step;
+}
+
+
+
+[numthreads(8,8,1)]
+void ElectricField (uint3 id : SV_DispatchThreadID){
+    float3 pos = 0;
+
+    // Calculate the position of the vector and save that in the buffer
+    if(id.x < _Resolution && id.y < _Resolution){
+        pos = GetPOS(id);
+        _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m03 = pos.x;
+        _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m13 = pos.y;
+        _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m23 = pos.z;
+    }
+
+
+    // Calculate the direction of the electric field vector    
+    float3 direction = 0;
+    for(uint i = 0; i < _ChargeCount; i++){
+        float k = 0.1;
+        float3 rvec = _Charges[i].xyz - pos;
+        float dist = Magnitude(rvec);
+        direction += k * (_Charges[i].w / (dist * dist * dist)) * rvec;
+    }
+
+    // Calculate the transformation matrix for desired rotation
+    CalcTransformationMatrix(id, direction);
+    
+}
+
+[numthreads(8,8,1)]
+void MagneticField (uint3 id : SV_DispatchThreadID){
+    float3 pos = 0;
+
+    // Calculate the position of the vector and save that in the buffer
+    if(id.x < _Resolution && id.y < _Resolution){
+        pos = GetPOS(id);
+        _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m03 = pos.x;
+        _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m13 = pos.y;
+        _Vectors[id.x + id.y * _Resolution + id.z * _Resolution * _Resolution]._m23 = pos.z;
+    }
+
+    // Calculate the direction of the magnetic field vector
+    float3 direction = 0;
+    for(uint i = 0; i < _CurrentCount; i++){
+        float3 rvec = _CurrentPos[i].xyz - pos;
+        float dist = Magnitude(rvec);
+        direction += (_Currents[i].w  * CrossProd(_Currents[i].xyz, rvec)) / (dist * dist * dist);
+    }
+
+    // Calculate the transformation matrix for desired rotation
+    CalcTransformationMatrix(id, direction);
+    
+}
